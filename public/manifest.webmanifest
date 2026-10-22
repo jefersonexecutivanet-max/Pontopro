@@ -1,0 +1,11 @@
+{
+  "name": "PontoPro - Controle de Ponto",
+  "short_name": "PontoPro",
+  "description": "Registro de jornada e consulta de marcações.",
+  "lang": "pt-BR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617"
+}

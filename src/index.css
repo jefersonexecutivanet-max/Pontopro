@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* Base visual: controles discretos, sem botões em formato de pílula. */
+button.rounded-full {
+  border-radius: 0.625rem !important;
+}
+
+button {
+  transition-duration: 120ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
