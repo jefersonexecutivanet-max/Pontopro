@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper: check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper: get user's role from custom claims
+    function getUserRole() {
+      return request.auth.token.role;
+    }
+
+    // Helper: get user's companyId from custom claims
+    function getUserCompanyId() {
+      return request.auth.token.companyId;
+    }
+
+    // Helper: check if user belongs to the same company as the document
+    function isSameCompany(companyId) {
+      return isAuthenticated() && getUserCompanyId() == companyId;
+    }
+
+    // Helper: check if user is admin/owner/manager
+    function isAdminOrAbove() {
+      return isAuthenticated() && (getUserRole() == 'saas_owner' || getUserRole() == 'company_admin' || getUserRole() == 'manager');
+    }
+
+    // ---------- Companies ----------
+    match /companies/{companyId} {
+      allow read: if isSameCompany(companyId);
+      allow create: if isAuthenticated() && isAdminOrAbove();
+      allow update: if isSameCompany(companyId) && isAdminOrAbove();
+      allow delete: if isSameCompany(companyId) && getUserRole() == 'saas_owner';
+    }
+
+    // ---------- Establishments ----------
+    match /establishments/{establishmentId} {
+      allow read: if isAuthenticated() && isSameCompany(resource.data.company_id);
+      allow create: if isAuthenticated() && isAdminOrAbove() && isSameCompany(request.resource.data.company_id);
+      allow update: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+      allow delete: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+    }
+
+    // ---------- Employees ----------
+    match /employees/{employeeId} {
+      allow read: if isAuthenticated() && isSameCompany(resource.data.company_id);
+      allow create: if isAuthenticated() && isAdminOrAbove() && isSameCompany(request.resource.data.company_id);
+      allow update: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+      allow delete: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+    }
+
+    // ---------- Work Schedules ----------
+    match /work_schedules/{scheduleId} {
+      allow read: if isAuthenticated() && isSameCompany(resource.data.company_id);
+      allow create: if isAuthenticated() && isAdminOrAbove() && isSameCompany(request.resource.data.company_id);
+      allow update: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+      allow delete: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+    }
+
+    // ---------- Time Events (Punches) ----------
+    match /time_events/{punchId} {
+      allow read: if isAuthenticated() && isSameCompany(resource.data.company_id);
+      allow create: if isAuthenticated() && isSameCompany(request.resource.data.company_id);
+      allow update: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+      allow delete: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+    }
+
+    // ---------- Corrections ----------
+    match /corrections/{correctionId} {
+      allow read: if isAuthenticated() && isSameCompany(resource.data.company_id);
+      allow create: if isAuthenticated() && isSameCompany(request.resource.data.company_id);
+      allow update: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+      allow delete: if isAuthenticated() && isAdminOrAbove() && isSameCompany(resource.data.company_id);
+    }
+
+    // ---------- Audit Logs ----------
+    match /audit_logs/{logId} {
+      allow read: if isAuthenticated() && isSameCompany(resource.data.company_id);
+      allow create: if isAuthenticated() && isSameCompany(request.resource.data.company_id);
+      allow update: if false; // append-only
+      allow delete: if false; // never delete audit logs
+    }
+  }
+}
