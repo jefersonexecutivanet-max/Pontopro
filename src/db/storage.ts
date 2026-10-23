@@ -1,11 +1,11 @@
-/**
+﻿/**
  * Persistent Storage Layer for PontoPro
- * Durable SQLite state store for a single persistent Node server. Uses atomic transactions and daily local backups. Multi-instance/serverless deployments still require a managed shared database adapter.
+ * Firestore backend for multi-instance deployments.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
+
 import {
   Company,
   Establishment,
@@ -17,7 +17,7 @@ import {
   LicenseStatus,
   AuditLog,
 } from '../types';
-import { computeEventHash, generatePunchReceipt } from '../domain/rep-p';
+
 import { issuePerpetualLicense } from '../domain/license';
 
 export interface BillingSubscription {
@@ -38,87 +38,36 @@ export interface DatabaseState {
   processed_billing_webhooks?: string[];
 }
 
-const DATA_DIR = path.resolve(process.env.PONTOPRO_DATA_DIR || path.join(process.cwd(), 'data'));
-const DB_FILE = path.join(DATA_DIR, 'pontopro.sqlite');
-const LEGACY_DB_FILE = path.join(DATA_DIR, 'pontopro.db.json');
-const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 
 class StorageManager {
   private state: DatabaseState | null = null;
-  private db: DatabaseSync;
+  private db: FirebaseFirestore.Firestore;
 
   constructor() {
-    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(DB_FILE);
-    try { fs.chmodSync(DB_FILE, 0o600); } catch { /* ACLs do Windows são gerenciadas pelo sistema operacional. */ }
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;');
-    this.db.exec(`CREATE TABLE IF NOT EXISTS pontopro_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL, updated_at TEXT NOT NULL)`);
-    this.ensureLoaded();
-  }
-
-  private ensureLoaded(): DatabaseState {
-    if (this.state) return this.state;
-
-    const row = this.db.prepare('SELECT payload FROM pontopro_state WHERE id = 1').get() as { payload: string } | undefined;
-    if (row?.payload) {
-      try {
-        this.state = JSON.parse(row.payload) as DatabaseState;
-        this.state.billing_subscriptions ||= [];
-        this.state.processed_billing_webhooks ||= [];
-        return this.state;
-      } catch (err) {
-        throw new Error(`O banco SQLite do PontoPro está corrompido. Não foi reinicializado para evitar perda de dados. Detalhe: ${String(err)}`);
+    if (getApps().length === 0) {
+      const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT) : undefined;
+      if (serviceAccount) {
+        initializeApp({ credential: cert(serviceAccount), projectId: serviceAccount.project_id });
+      } else {
+        initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'pontopro-77ad7' });
       }
     }
-
-    // Migração automática do banco JSON usado nas versões anteriores, sem apagar o original.
-    if (fs.existsSync(LEGACY_DB_FILE)) {
-      try {
-        this.state = JSON.parse(fs.readFileSync(LEGACY_DB_FILE, 'utf8')) as DatabaseState;
-        this.saveState();
-        const migratedBackup = `${LEGACY_DB_FILE}.migrated-backup`;
-        if (!fs.existsSync(migratedBackup)) fs.copyFileSync(LEGACY_DB_FILE, migratedBackup);
-        console.log('[PontoPro] Dados JSON migrados para SQLite; cópia anterior preservada.');
-        return this.state;
-      } catch (err) {
-        throw new Error(`Falha ao migrar o banco JSON. Os dados originais foram preservados. Detalhe: ${String(err)}`);
-      }
-    }
-
+    this.db = getFirestore();
     this.state = this.buildInitialSeed();
-    this.saveState();
-    return this.state;
-  }
-
-  private createDailyBackup(): void {
-    const row = this.db.prepare('SELECT id FROM pontopro_state WHERE id = 1').get();
-    if (!row || !fs.existsSync(DB_FILE)) return;
-    const day = new Date().toISOString().slice(0, 10);
-    fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
-    const backupFile = path.join(BACKUP_DIR, `pontopro-${day}.sqlite`);
-    if (fs.existsSync(backupFile)) return;
-    this.db.exec('PRAGMA wal_checkpoint(FULL)');
-    fs.copyFileSync(DB_FILE, backupFile);
-    try { fs.chmodSync(backupFile, 0o600); } catch { /* ACLs do Windows são gerenciadas pelo sistema operacional. */ }
-    // Mantém no máximo 30 cópias diárias locais; backups externos continuam recomendados.
-    const backups = fs.readdirSync(BACKUP_DIR).filter(name => /^pontopro-\d{4}-\d{2}-\d{2}\.sqlite$/.test(name)).sort();
-    for (const old of backups.slice(0, Math.max(0, backups.length - 30))) {
-      try { fs.unlinkSync(path.join(BACKUP_DIR, old)); } catch (err) { console.warn('[PontoPro] Não foi possível remover backup antigo:', err); }
-    }
   }
 
   public saveState(): void {
     if (!this.state) return;
-    this.createDailyBackup();
-    const statement = this.db.prepare(`INSERT INTO pontopro_state (id, payload, updated_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`);
-    this.db.exec('BEGIN IMMEDIATE');
     try {
-      statement.run(JSON.stringify(this.state), new Date().toISOString());
-      this.db.exec('COMMIT');
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
-    }
+      const docRef = this.db.collection('app_state').doc('main');
+      docRef.set(this.state).catch(() => {});
+    } catch {}
+  }
+
+  private ensureLoaded(): DatabaseState {
+    if (this.state) return this.state;
+    this.state = this.buildInitialSeed();
+    return this.state;
   }
 
   private buildInitialSeed(): DatabaseState {
@@ -381,3 +330,4 @@ class StorageManager {
 }
 
 export const storage = new StorageManager();
+
