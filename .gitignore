@@ -12,3 +12,6 @@ data/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# Arquivos indevidos da Lixeira do Windows
+$Recycle.Bin/
