@@ -110,28 +110,32 @@ export const api = {
     }
     if (!res.ok) throw new Error('Não foi possível verificar a sessão. Tente novamente.');
     return res.json() as Promise<{
-      employee: Employee;
-      company: Company;
-      establishment: Establishment;
+      employee?: Employee;
+      owner?: { email: string; role: string };
+      company?: Company;
+      establishment?: Establishment;
+      companies?: Company[];
     }>;
   },
 
-  async login(identifier: string, password?: string, mode?: 'employee' | 'admin') {
+  async login(identifier: string, password?: string, firebaseAuth?: boolean) {
     const res = await authorizedFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, password, mode }),
+      body: JSON.stringify({ identifier, password, firebaseAuth }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'Credenciais invÃ¡lidas.');
+      throw new Error(data.error || 'Credenciais inválidas.');
     }
     const result = (await res.json()) as {
       success: boolean;
       token: string;
-      employee: Employee;
-      company: Company;
-      establishment: Establishment;
+      employee?: Employee;
+      owner?: { email: string; role: string };
+      company?: Company;
+      establishment?: Establishment;
+      companies?: Company[];
     };
     if (result.token) setAuthToken(result.token);
     return result;

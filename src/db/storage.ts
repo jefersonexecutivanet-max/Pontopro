@@ -41,27 +41,41 @@ export interface DatabaseState {
 
 class StorageManager {
   private state: DatabaseState | null = null;
-  private db: FirebaseFirestore.Firestore;
+  private db: FirebaseFirestore.Firestore | null = null;
+  private firestoreAvailable = false;
 
   constructor() {
-    if (getApps().length === 0) {
-      const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT) : undefined;
-      if (serviceAccount) {
-        initializeApp({ credential: cert(serviceAccount), projectId: serviceAccount.project_id });
-      } else {
-        initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'pontopro-77ad7' });
+    try {
+      if (getApps().length === 0) {
+        const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT) : undefined;
+        if (serviceAccount) {
+          initializeApp({ credential: cert(serviceAccount), projectId: serviceAccount.project_id });
+        } else {
+          initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID || 'pontopro-77ad7' });
+        }
       }
+      this.db = getFirestore();
+      this.firestoreAvailable = true;
+    } catch {
+      // Firestore não disponível — funciona apenas em memória
+      this.firestoreAvailable = false;
     }
-    this.db = getFirestore();
     this.state = this.buildInitialSeed();
   }
 
   public saveState(): void {
     if (!this.state) return;
+    // Sem credenciais do Google Cloud configuradas — não persiste no Firestore
+    if (!process.env.FIREBASE_SERVICE_ACCOUNT && !process.env.GOOGLE_APPLICATION_CREDENTIALS) return;
+    if (!this.firestoreAvailable || !this.db) return;
     try {
       const docRef = this.db.collection('app_state').doc('main');
-      docRef.set(this.state).catch(() => {});
+      void docRef.set(this.state).catch(() => {});
     } catch {}
+  }
+
+  public isFirestoreAvailable(): boolean {
+    return this.firestoreAvailable;
   }
 
   private ensureLoaded(): DatabaseState {

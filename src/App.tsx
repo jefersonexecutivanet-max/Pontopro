@@ -100,6 +100,25 @@ export default function App() {
       }
       try {
         const meData = await api.getMe();
+        if (!meData) {
+          setIsAuthenticated(false);
+          setCurrentEmployee(null);
+          setLoading(false);
+          return;
+        }
+
+        // Owner (saas_owner) session
+        if (meData.owner) {
+          setIsAuthenticated(true);
+          setCurrentEmployee(null);
+          setCurrentCompany(null);
+          setCurrentEstablishment(undefined);
+          setActiveTab('dashboard');
+          setAllCompanies(meData.companies || []);
+          setLoading(false);
+          return;
+        }
+
         if (!meData?.employee) {
           setIsAuthenticated(false);
           setCurrentEmployee(null);
@@ -185,26 +204,42 @@ export default function App() {
 
   // Handle Login
   const handleLoginSuccess = async (data: {
-    employee: Employee;
-    company: Company;
-    establishment: Establishment;
+    employee?: Employee;
+    owner?: { email: string; role: string };
+    company?: Company;
+    establishment?: Establishment;
+    companies?: Company[];
   }) => {
     setLoading(true);
-    setCurrentEmployee(data.employee);
-    setCurrentCompany(data.company);
-    setCurrentEstablishment(data.establishment);
+
+    if (data.owner) {
+      // Owner (saas_owner) login — full access to all companies
+      setIsAuthenticated(true);
+      setCurrentEmployee(null);
+      setCurrentCompany(null);
+      setCurrentEstablishment(undefined);
+      setActiveTab('dashboard');
+      setAllCompanies(data.companies || []);
+      showToast(`Bem-vindo, ${data.owner.email}! Acesso do proprietário autenticado.`);
+      setLoading(false);
+      return;
+    }
+
+    setCurrentEmployee(data.employee!);
+    setCurrentCompany(data.company!);
+    setCurrentEstablishment(data.establishment!);
     setIsAuthenticated(true);
 
-    if (data.employee.role === 'employee') {
+    if (data.employee!.role === 'employee') {
       setActiveTab('punch');
-    } else if (data.employee.role === 'auditor') {
+    } else if (data.employee!.role === 'auditor') {
       setActiveTab('compliance');
     } else {
       setActiveTab('dashboard');
     }
 
-    showToast(`Bem-vindo, ${data.employee.name}! SessÃ£o autenticada.`);
-    await checkSessionAndLoad(data.company.id);
+    showToast(`Bem-vindo, ${data.employee!.name}! Sessão autenticada.`);
+    await checkSessionAndLoad(data.company!.id);
   };
 
   // Handle Logout (Strict Individual Session - No account migration without logout)

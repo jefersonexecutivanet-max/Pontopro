@@ -22,15 +22,15 @@ import { BILLING_PLANS, normalizeBillingPlan, resolveBillingStatus, canAddEmploy
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-async function startServer() {
-  const app = express();
-  const PORT = Number(process.env.PORT || 3000);
-  const DATA_DIR = path.resolve(process.env.PONTOPRO_DATA_DIR || path.join(process.cwd(), 'data'));
-  const OWNER_FILE = path.join(DATA_DIR, 'owner-account.json');
-  const ownerSessions = new Map<string, { email: string; createdAt: number }>();
-  const userSessions = new Map<string, { userId: string; createdAt: number }>();
-  const billingCreationLocks = new Set<string>();
-  const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const DATA_DIR = path.resolve(process.env.PONTOPRO_DATA_DIR || path.join(process.cwd(), 'data'));
+const OWNER_FILE = path.join(DATA_DIR, 'owner-account.json');
+
+const app = express();
+const PORT = Number(process.env.PORT || 3000);
+const ownerSessions = new Map<string, { email: string; createdAt: number }>();
+const userSessions = new Map<string, { userId: string; createdAt: number }>();
+const billingCreationLocks = new Set<string>();
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
   const hashSecret = (secret: string, salt = crypto.randomBytes(16).toString('hex')) => {
     const digest = crypto.scryptSync(secret, salt, 64).toString('hex');
@@ -47,7 +47,15 @@ async function startServer() {
 
   const readOwner = () => {
     try { return JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8')) as { email: string; password_hash: string }; }
-    catch { return null; }
+    catch {
+      // Fallback para variáveis de ambiente (útil no Vercel e para testes locais sem arquivo)
+      if (process.env.PONTOPRO_OWNER_EMAIL && process.env.PONTOPRO_OWNER_PASSWORD) {
+        const email = String(process.env.PONTOPRO_OWNER_EMAIL).trim().toLowerCase();
+        const password_hash = hashSecret(String(process.env.PONTOPRO_OWNER_PASSWORD));
+        return { email, password_hash };
+      }
+      return null;
+    }
   };
   if (process.env.NODE_ENV === 'production' && !readOwner()) {
     const bootstrapEmail = String(process.env.PONTOPRO_OWNER_EMAIL || '').trim().toLowerCase();
@@ -76,6 +84,13 @@ async function startServer() {
     if (!employee || !employee.active) { userSessions.delete(token); return undefined; }
     const company = storage.getCompanyById(employee.company_id);
     return company?.active ? employee : undefined;
+  };
+  const authenticatedOwner = (req: express.Request): { email: string } | undefined => {
+    const token = bearerToken(req);
+    const session = token ? ownerSessions.get(token) : undefined;
+    if (!session) return undefined;
+    if (Date.now() - session.createdAt > SESSION_TTL_MS) { ownerSessions.delete(token); return undefined; }
+    return session;
   };
   const publicEmployee = (employee: Employee) => {
     const { password_hash: _passwordHash, pin_hash: _pinHash, pin: _pin, ...safeEmployee } = employee;
@@ -112,6 +127,10 @@ async function startServer() {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(self), microphone=()');
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
     if (process.env.NODE_ENV === 'production' && req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     if (req.path.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
     next();
@@ -299,6 +318,13 @@ async function startServer() {
   });
 
   app.get('/api/auth/me', (req, res) => {
+    const owner = authenticatedOwner(req);
+    if (owner) {
+      return res.json({
+        owner: { email: owner.email, role: 'saas_owner' },
+        companies: storage.getCompanies(),
+      });
+    }
     const employee = authenticatedEmployee(req);
     if (!employee) {
       return res.status(401).json({ error: 'Usuário não encontrado ou sessão expirada' });
@@ -316,6 +342,17 @@ async function startServer() {
     });
   });
 
+  app.get('/api/health', (_req, res) => {
+    const firestoreReady = Boolean(storage.isFirestoreAvailable());
+    res.json({
+      status: 'ok',
+      service: 'pontopro-api',
+      environment: process.env.NODE_ENV || 'development',
+      firestore: firestoreReady ? 'connected' : 'unavailable',
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   app.post('/api/auth/login', (req, res) => {
     const ipKey = String(req.ip || 'unknown');
     const now = Date.now();
@@ -324,24 +361,66 @@ async function startServer() {
       return res.status(429).json({ error: 'Muitas tentativas de acesso. Aguarde 15 minutos e tente novamente.' });
     }
     if (attempts && now - attempts.firstAt > 15 * 60 * 1000) failedLogins.delete(ipKey);
-    const { identifier, password, mode } = req.body;
+    const { identifier, password, firebaseAuth } = req.body;
     if (!identifier || !String(identifier).trim()) {
-      return res.status(400).json({ error: mode === 'employee' ? 'Informe sua matrícula.' : 'Informe seu usuário.' });
+      return res.status(400).json({ error: 'Informe seu e-mail ou usuário.' });
     }
 
     const cleanId = String(identifier).trim().toLowerCase();
-    const cleanDigits = cleanId.replace(/\D/g, '');
-    const allEmps = storage.getAllEmployees();
-    const employee = mode === 'employee'
-      ? allEmps.find((e) => e.matricula.trim().toLowerCase() === cleanId && e.role === 'employee')
-      : allEmps.find((e) => e.email.toLowerCase() === cleanId && ['company_admin', 'manager', 'auditor'].includes(e.role));
+    const isFirebase = firebaseAuth === true;
 
-    if (!employee || !verifySecret(String(password || ''), mode === 'employee' ? employee.pin_hash : employee.password_hash)) {
+    // ---------- Owner (saas_owner) authentication ----------
+    const owner = readOwner();
+    if (owner && owner.email === cleanId) {
+      if (!isFirebase && !verifySecret(String(password || ''), owner.password_hash)) {
+        const state = failedLogins.get(ipKey) || { count: 0, firstAt: now };
+        state.count += 1;
+        if (state.count >= 8) state.blockedUntil = now + 15 * 60 * 1000;
+        failedLogins.set(ipKey, state);
+        return res.status(state.blockedUntil ? 429 : 401).json({ error: state.blockedUntil ? 'Muitas tentativas de acesso. Aguarde 15 minutos e tente novamente.' : 'Credenciais inválidas.' });
+      }
+      failedLogins.delete(ipKey);
+      const token = crypto.randomBytes(32).toString('hex');
+      ownerSessions.set(token, { email: cleanId, createdAt: Date.now() });
+      storage.addAuditLog({
+        id: `audit-${Date.now()}`,
+        company_id: 'saas-owner',
+        user_id: 'saas-owner',
+        user_name: cleanId,
+        user_role: 'saas_owner',
+        action: 'USER_LOGIN',
+        target_type: 'auth_session',
+        target_id: 'saas-owner',
+        details: { identifier, role: 'saas_owner', method: isFirebase ? 'firebase_auth' : 'owner_credentials' },
+        ip_address: req.ip || '127.0.0.1',
+        created_at: new Date().toISOString(),
+      });
+      return res.json({
+        success: true,
+        token,
+        owner: { email: cleanId, role: 'saas_owner' },
+        companies: storage.getCompanies(),
+      });
+    }
+
+    // ---------- Employee / Administrator authentication ----------
+    const allEmps = storage.getAllEmployees();
+    const employee = allEmps.find((e) => e.email.toLowerCase() === cleanId && ['company_admin', 'manager', 'auditor', 'employee'].includes(e.role));
+
+    if (!employee) {
       const state = failedLogins.get(ipKey) || { count: 0, firstAt: now };
       state.count += 1;
       if (state.count >= 8) state.blockedUntil = now + 15 * 60 * 1000;
       failedLogins.set(ipKey, state);
-      return res.status(state.blockedUntil ? 429 : 401).json({ error: state.blockedUntil ? 'Muitas tentativas de acesso. Aguarde 15 minutos e tente novamente.' : 'Credenciais inválidas. Confira sua matrícula/e-mail e sua senha/PIN.' });
+      return res.status(state.blockedUntil ? 429 : 401).json({ error: state.blockedUntil ? 'Muitas tentativas de acesso. Aguarde 15 minutos e tente novamente.' : 'Credenciais inválidas. Confira seu e-mail e sua senha/PIN.' });
+    }
+
+    if (!isFirebase && !verifySecret(String(password || ''), employee.role === 'employee' ? employee.pin_hash : employee.password_hash)) {
+      const state = failedLogins.get(ipKey) || { count: 0, firstAt: now };
+      state.count += 1;
+      if (state.count >= 8) state.blockedUntil = now + 15 * 60 * 1000;
+      failedLogins.set(ipKey, state);
+      return res.status(state.blockedUntil ? 429 : 401).json({ error: state.blockedUntil ? 'Muitas tentativas de acesso. Aguarde 15 minutos e tente novamente.' : 'Credenciais inválidas. Confira seu e-mail e sua senha/PIN.' });
     }
     failedLogins.delete(ipKey);
 
@@ -369,7 +448,7 @@ async function startServer() {
       action: 'USER_LOGIN',
       target_type: 'auth_session',
       target_id: employee.id,
-      details: { identifier, role: employee.role, method: 'individual_credentials' },
+      details: { identifier, role: employee.role, method: isFirebase ? 'firebase_auth' : 'individual_credentials' },
       ip_address: req.ip || '127.0.0.1',
       created_at: new Date().toISOString(),
     });
@@ -385,9 +464,11 @@ async function startServer() {
 
   app.post('/api/auth/logout', (req, res) => {
     const token = bearerToken(req);
-    const session = token ? userSessions.get(token) : undefined;
-    const employee = session ? storage.getEmployeeById(session.userId) : undefined;
+    const userSession = token ? userSessions.get(token) : undefined;
+    const ownerSession = token ? ownerSessions.get(token) : undefined;
+    const employee = userSession ? storage.getEmployeeById(userSession.userId) : undefined;
     if (token) userSessions.delete(token);
+    if (token) ownerSessions.delete(token);
 
     if (employee) {
       storage.addAuditLog({
@@ -410,7 +491,14 @@ async function startServer() {
 
   // Every data endpoint requires a server-issued bearer session. User IDs supplied by the browser are never authentication.
   app.use('/api', (req, res, next) => {
-    if (req.path.startsWith('/owner/') || req.path === '/auth/login' || req.path === '/auth/profiles' || req.path === '/owner/setup-status' || req.path === '/owner/setup') return next();
+    if (req.path === '/auth/login' || req.path === '/auth/profiles') return next();
+    if (req.path.startsWith('/owner/setup-status') || req.path.startsWith('/owner/setup')) return next();
+    if (req.path.startsWith('/owner/')) {
+      const owner = authenticatedOwner(req);
+      if (!owner) return res.status(401).json({ error: 'Sessão do proprietário inválida ou expirada.' });
+      res.locals.authOwner = owner;
+      return next();
+    }
     if (req.path === '/auth/logout') {
       const employee = authenticatedEmployee(req);
       if (!employee) return res.status(401).json({ error: 'Sessão inválida ou expirada. Entre novamente.' });
@@ -528,6 +616,11 @@ async function startServer() {
   // COMPANIES & ESTABLISHMENTS
   // -------------------------------------------------------------
   app.get('/api/companies', (req, res) => {
+    const owner = res.locals.authOwner;
+    if (owner) {
+      res.json(storage.getCompanies().map(publicCompany));
+      return;
+    }
     const user = res.locals.authEmployee as Employee;
     res.json(storage.getCompanies().filter((company) => company.id === user.company_id).map(publicCompany));
   });
@@ -1094,6 +1187,7 @@ async function startServer() {
   });
 
   // -------------------------------------------------------------
+async function startServer() {
   // VITE DEV SERVER INTEGRATION
   // -------------------------------------------------------------
   if (process.env.NODE_ENV === 'production') {
@@ -1111,12 +1205,24 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
+  // Catch-all 404 for unknown API routes
+  app.use('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'Endpoint não encontrado.', code: 'API_ROUTE_NOT_FOUND' });
+  });
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[PontoPro] ${process.env.NODE_ENV === 'production' ? 'Production' : 'Development'} server running on http://localhost:${PORT}`);
   });
 }
 
-startServer().catch((err) => {
-  console.error('[PontoPro] Server failed to start:', err);
-  process.exit(1);
-});
+export const getApp = () => app;
+export { app, startServer };
+
+// Inicia o servidor apenas quando executado diretamente (não quando importado por api/index.ts)
+const isMainModule = process.argv[1] && path.resolve(process.argv[1]) === __filename;
+if (isMainModule) {
+  startServer().catch((err) => {
+    console.error('[PontoPro] Server failed to start:', err);
+    process.exit(1);
+  });
+}

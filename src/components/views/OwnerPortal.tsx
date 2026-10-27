@@ -15,7 +15,6 @@ async function request(path: string, token: string, init: RequestInit = {}) {
 }
 
 export const OwnerPortal: React.FC<{ onExit: () => void }> = ({ onExit }) => {
-  const [configured, setConfigured] = useState<boolean | null>(null);
   const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) || '');
   const [owner, setOwner] = useState<Owner | null>(() => {
     const email = sessionStorage.getItem(OWNER_EMAIL_KEY);
@@ -38,10 +37,6 @@ export const OwnerPortal: React.FC<{ onExit: () => void }> = ({ onExit }) => {
   };
 
   useEffect(() => {
-    fetch('/api/owner/setup-status').then(r => r.json()).then(data => setConfigured(Boolean(data.configured))).catch(() => setError('Não foi possível conectar ao servidor.'));
-  }, []);
-
-  useEffect(() => {
     if (!token) return;
     loadCompanies(token).catch((e: Error) => {
       setError(e.message);
@@ -54,11 +49,11 @@ export const OwnerPortal: React.FC<{ onExit: () => void }> = ({ onExit }) => {
   const submitAuth = async (event: React.FormEvent) => {
     event.preventDefault(); setBusy(true); setError(''); setNotice('');
     try {
-      const response = await fetch(configured ? '/api/owner/login' : '/api/owner/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+      const response = await fetch('/api/owner/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Falha na autenticação.');
       sessionStorage.setItem(TOKEN_KEY, data.token); sessionStorage.setItem(OWNER_EMAIL_KEY, data.owner.email);
-      setToken(data.token); setOwner(data.owner); setConfigured(true); setPassword(''); setNotice('Acesso do proprietário confirmado.');
+      setToken(data.token); setOwner(data.owner); setPassword(''); setNotice('Acesso do proprietário confirmado.');
     } catch (e) { setError(e instanceof Error ? e.message : 'Erro inesperado.'); }
     finally { setBusy(false); }
   };
@@ -115,12 +110,11 @@ export const OwnerPortal: React.FC<{ onExit: () => void }> = ({ onExit }) => {
         <label className="block text-xs font-semibold text-slate-300">E-mail do proprietário
           <input type="email" required value={email} onChange={e => setEmail(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white" />
         </label>
-        <label className="mt-4 block text-xs font-semibold text-slate-300">{configured ? 'Senha do proprietário' : 'Crie a senha do proprietário'}
+        <label className="mt-4 block text-xs font-semibold text-slate-300">Senha do proprietário
           <input type="password" required minLength={12} value={password} onChange={e => setPassword(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-3 text-sm text-white" placeholder="Mínimo de 12 caracteres" />
         </label>
-        {!configured && <p className="mt-3 text-xs leading-relaxed text-amber-300">Primeiro acesso: esta senha será armazenada como hash no servidor. Guarde-a com segurança; não existe senha padrão.</p>}
-        <button disabled={busy || configured === null} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold hover:bg-blue-500 disabled:opacity-50">
-          {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}{configured ? 'Entrar como proprietário' : 'Configurar proprietário'}
+        <button disabled={busy} className="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold hover:bg-blue-500 disabled:opacity-50">
+          {busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}Entrar como proprietário
         </button>
         <button type="button" onClick={onExit} className="mt-3 w-full py-2 text-xs text-slate-400 hover:text-white">Voltar</button>
       </form>
